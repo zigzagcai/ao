@@ -4,15 +4,15 @@ export CHECKPOINT_PATH=../../../checkpoints # path to checkpoints folder
 export MODEL_REPO=meta-llama/Llama-2-7b-chat-hf
 python generate.py --checkpoint_path $CHECKPOINT_PATH/$MODEL_REPO/model.pth --precision float16 --quantization gemlite-4-64 --num_samples 1  --write_result benchmark_results.txt --compile
 
-# python generate.py --checkpoint_path $CHECKPOINT_PATH/$MODEL_REPO/model.pth --num_samples 1 --write_result benchmark_results.txt
-# python generate.py --checkpoint_path $CHECKPOINT_PATH/$MODEL_REPO/model.pth --num_samples 1 --batch_size 2 --write_result benchmark_results.txt
-# python generate.py --checkpoint_path $CHECKPOINT_PATH/$MODEL_REPO/model.pth --num_samples 1 --batch_size 4 --write_result benchmark_results.txt
-# python generate.py --checkpoint_path $CHECKPOINT_PATH/$MODEL_REPO/model.pth --compile --quantization int4wo-64 --num_samples 1  --write_result benchmark_results.txt
-# python generate.py --checkpoint_path $CHECKPOINT_PATH/$MODEL_REPO/model.pth --compile --quantization int4wo-64 --batch_size 2 --num_samples 1  --write_result benchmark_results.txt
-# python generate.py --checkpoint_path $CHECKPOINT_PATH/$MODEL_REPO/model.pth --compile --quantization int4wo-64 --batch_size 4 --num_samples 1  --write_result benchmark_results.txt
-# python generate.py --checkpoint_path $CHECKPOINT_PATH/$MODEL_REPO/model.pth --precision float16 --quantization gemlite-4-64 --num_samples 1  --write_result benchmark_results.txt
-# python generate.py --checkpoint_path $CHECKPOINT_PATH/$MODEL_REPO/model.pth --precision float16 --quantization gemlite-4-64 --num_samples 1 --batch_size 2  --write_result benchmark_results.txt
-# python generate.py --checkpoint_path $CHECKPOINT_PATH/$MODEL_REPO/model.pth --precision float16 --quantization gemlite-4-64 --num_samples 1 --batch_size 4  --write_result benchmark_results.txt
+python generate.py --checkpoint_path $CHECKPOINT_PATH/$MODEL_REPO/model.pth --num_samples 1 --write_result benchmark_results.txt
+python generate.py --checkpoint_path $CHECKPOINT_PATH/$MODEL_REPO/model.pth --num_samples 1 --batch_size 2 --write_result benchmark_results.txt
+python generate.py --checkpoint_path $CHECKPOINT_PATH/$MODEL_REPO/model.pth --num_samples 1 --batch_size 4 --write_result benchmark_results.txt
+python generate.py --checkpoint_path $CHECKPOINT_PATH/$MODEL_REPO/model.pth --quantization int4wo-64 --num_samples 1  --write_result benchmark_results.txt
+python generate.py --checkpoint_path $CHECKPOINT_PATH/$MODEL_REPO/model.pth --quantization int4wo-64 --batch_size 2 --num_samples 1  --write_result benchmark_results.txt
+python generate.py --checkpoint_path $CHECKPOINT_PATH/$MODEL_REPO/model.pth --quantization int4wo-64 --batch_size 4 --num_samples 1  --write_result benchmark_results.txt
+python generate.py --checkpoint_path $CHECKPOINT_PATH/$MODEL_REPO/model.pth --precision float16 --quantization gemlite-4-64 --num_samples 1  --write_result benchmark_results.txt
+python generate.py --checkpoint_path $CHECKPOINT_PATH/$MODEL_REPO/model.pth --precision float16 --quantization gemlite-4-64 --num_samples 1 --batch_size 2  --write_result benchmark_results.txt
+python generate.py --checkpoint_path $CHECKPOINT_PATH/$MODEL_REPO/model.pth --precision float16 --quantization gemlite-4-64 --num_samples 1 --batch_size 4  --write_result benchmark_results.txt
 
 
 # python generate.py --checkpoint_path $CHECKPOINT_PATH/$MODEL_REPO/model.pth --compile --write_result benchmark_results.txt
