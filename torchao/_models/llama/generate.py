@@ -48,7 +48,7 @@ def logits_to_probs(logits, temperature: float = 1.0, top_k: Optional[int] = Non
     return probs
 
 def sample(logits, temperature: float = 1.0, top_k: Optional[int] = None):
-    probs = logits_to_probs(logits[0, -1], temperature, top_k)
+    probs = logits_to_probs(logits[:, -1], temperature, top_k)
     idx_next = multinomial_sample_one_no_sync(probs)
     return idx_next, probs
 
@@ -75,7 +75,7 @@ def decode_n_tokens(model: Transformer, cur_token: torch.Tensor, input_pos: torc
             new_tokens.append(next_token)
             callback(new_tokens[-1])
             new_probs.append(next_prob)
-            cur_token = next_token.view(1, -1)
+            cur_token = next_token
 
     return new_tokens, new_probs
 
@@ -88,6 +88,7 @@ def generate(
     model: Transformer,
     prompt: torch.Tensor,
     max_new_tokens: int,
+    batch_size: int,
     *,
     interactive: bool,
     callback = lambda x: x,
@@ -102,34 +103,37 @@ def generate(
 
     # create an empty tensor of the expected final shape and fill in the current tokens
     device = prompt.device
-    T = prompt.numel()
+    T = prompt.size(-1)
 
     # calculate how many tokens to generate based on max_new_tokens and model's upper bound (block_size)
     max_seq_length = min(T + max_new_tokens, model.config.block_size) if not interactive else 350
     new_tokens = max_seq_length - T
 
+    # expand prompt based on 
+    prompt, input_pos = prepare_inputs_for_model(prompt)
+    prompt = prompt.repeat(batch_size, 1)
+
     # full prompt+output will be stored in seq
-    seq = torch.empty(max_seq_length, dtype=prompt.dtype, device=device)
-    seq[:T] = prompt.view(-1)
+    seq = torch.empty(batch_size, max_seq_length, dtype=prompt.dtype, device=device)
+    seq[:, :T] = prompt
 
     # setup model caches
     with torch.device(device):
         if cache_size is None:
             cache_size = max_seq_length
         assert cache_size >= max_seq_length, "need cache_size to be greater than max_new_tokens + size-of-prompt"
-        model.setup_caches(max_batch_size=1, max_seq_length=cache_size, kv_cache_quantization=kv_cache_quantization, linear_causal_mask=linear_causal_mask, prompt_length=T)
+        model.setup_caches(max_batch_size=batch_size, max_seq_length=cache_size, kv_cache_quantization=kv_cache_quantization, linear_causal_mask=linear_causal_mask, prompt_length=T)
 
     # format model input
-    x, input_pos = prepare_inputs_for_model(prompt, max_new_tokens)
+    
 
     # execute prefill
-    next_token = prefill(model, x, input_pos, **sampling_kwargs).clone()
-    seq[T] = next_token
+    next_token = prefill(model, prompt.view(batch_size, -1), input_pos, **sampling_kwargs).clone()
+    seq[:, T] = next_token.squeeze()
     # execute token generation
     input_pos = torch.tensor([T], device=device, dtype=torch.int)
-    generated_tokens, _ = decode_n_tokens(model, next_token.view(1, -1), input_pos, new_tokens-1, callback=callback, **sampling_kwargs)
-
-    seq = torch.cat((seq[:T+1], *generated_tokens))
+    generated_tokens, _ = decode_n_tokens(model, next_token.view(batch_size, -1), input_pos, new_tokens-1, callback=callback, **sampling_kwargs)
+    seq = torch.cat((seq[:, :T+1], *generated_tokens), dim=-1)
 
     return seq
 
@@ -157,6 +161,7 @@ def main(
     interactive: bool = False,
     num_samples: int = 5,
     max_new_tokens: int = 100,
+    batch_size: int = 1,
     top_k: int = 200,
     temperature: float = 0.8,
     checkpoint_path: Path = Path("checkpoints/meta-Transformer/Transformer-2-7b-chat-hf/model.pth"),
@@ -212,6 +217,44 @@ def main(
             autoquant,
             unwrap_tensor_subclass
         )
+        if "gemlite" in quantization:
+            from torchao.quantization.prototype.gemlite.core import GemLiteLinearTriton, DType
+            from torchao.quantization.quant_api import _replace_with_custom_fn_if_matches_filter, _is_linear
+            from hqq.core.quantize import HQQLinear, BaseQuantizeConfig
+            _quant_args = quantization.split("-")
+
+            W_nbits = int(_quant_args[1])
+            group_size = int(_quant_args[2])
+
+            assert W_nbits in [1, 2, 4, 8], f"W_nbits needs to be in [1, 2, 4, 8], got {W_nbits} for gemlite-<W_nbits>-<group_size>"
+            assert group_size in [64, 128, 256], f"group_size needs to be in [64, 128, 256], got {group_size} for gemlite-<W_nbits>-<group_size>"
+
+            def replace_fn(mod):
+                if not isinstance(mod, torch.nn.Linear):
+                    return mod
+
+                in_features = mod.in_features
+                out_features = mod.out_features
+                
+                compute_dtype = mod.weight.dtype
+                if(compute_dtype == torch.float16):
+                    input_dtype, output_dtype, acc_dtype = DType.FP16, DType.FP16, DType.FP16
+                else:
+                    input_dtype, output_dtype, acc_dtype = DType.BF16, DType.BF16, DType.FP32
+
+                quant_config = BaseQuantizeConfig(nbits=W_nbits, group_size=group_size, quant_zero=False, quant_scale=False, axis=1)
+                quant_config['weight_quant_params']['optimize'] = False
+                hqq_layer = HQQLinear(mod, quant_config=quant_config, compute_dtype=compute_dtype, device=device, del_orig=False)
+                orig_shape   = (out_features, in_features)
+                gemlite_linear = GemLiteLinearTriton(W_nbits=W_nbits, 
+                    group_size=group_size, in_features=in_features, out_features=out_features, 
+                    input_dtype=input_dtype, output_dtype=output_dtype, acc_dtype=acc_dtype)
+                gemlite_linear.pack(hqq_layer.unpack().view(orig_shape), hqq_layer.meta['scale'], hqq_layer.meta['zero'], None)
+                return gemlite_linear
+                
+
+            _replace_with_custom_fn_if_matches_filter(model, replace_fn, _is_linear)
+
         if "int8wo" in quantization:
             quantize_(model, int8_weight_only())
         if "int8dq" in quantization:
@@ -221,18 +264,18 @@ def main(
                 use_hqq=True
             else:
                 use_hqq=False
-            groupsize=int(quantization.split("-")[1])
-            assert groupsize in [32,64,128,256], f"int4wo groupsize needs to be one of [32,64,128,256] but got {groupsize}"
-            quantize_(model, int4_weight_only(group_size=groupsize))
+            group_size=int(quantization.split("-")[1])
+            assert group_size in [32,64,128,256], f"int4wo group_size needs to be one of [32,64,128,256] but got {group_size}"
+            quantize_(model, int4_weight_only(group_size=group_size))
         if "marlin" in quantization:
             from torchao.dtypes import MarlinSparseLayoutType
             quantize_(model, int4_weight_only(layout_type=MarlinSparseLayoutType()))
         if "fp6" in quantization:
             quantize_(model, fpx_weight_only(3, 2))
         if "uintx" in quantization:
-            # uintx-nbits-groupsize, e.g. "uintx-2-64"
+            # uintx-nbits-group_size, e.g. "uintx-2-64"
             if "hqq" in quantization:
-                # uintx-nbits-groupsize-hqq
+                # uintx-nbits-group_size-hqq
                 use_hqq = True
             else:
                 use_hqq = False
@@ -255,6 +298,7 @@ def main(
                 model,
                 encode_tokens(tokenizer, prompt, bos=True, device=device),
                 max_new_tokens,
+                batch_size,
                 interactive=False,
                 temperature=temperature,
                 top_k=top_k,
@@ -327,6 +371,7 @@ def main(
                 model,
                 encoded,
                 max_new_tokens,
+                batch_size,
                 interactive=interactive,
                 callback=callback,
                 temperature=temperature,
@@ -344,13 +389,13 @@ def main(
         t = time.perf_counter() - t0
 
         if not interactive:
-                tok_list = y.tolist()
+                tok_list = y[0].tolist()
                 # truncate text after end of string token
-                tokens = tok_list if not tokenizer.eos_id() in y else tok_list[:tok_list.index(tokenizer.eos_id())]
+                tokens = tok_list if not tokenizer.eos_id() in tok_list else tok_list[:tok_list.index(tokenizer.eos_id())]
                 print(tokenizer.decode(tokens))
         else:
             print()
-        tokens_generated = y.size(0) - prompt_length
+        tokens_generated = y.size(-1) - prompt_length
         tokens_sec = tokens_generated / t
         aggregate_metrics['tokens_per_sec'].append(tokens_sec)
         print(f"Time for inference {i + 1}: {t:.02f} sec total, {tokens_sec:.02f} tokens/sec")
@@ -391,6 +436,7 @@ def main(
         result_txt += f"--interactive " if interactive else ""
         result_txt += f"--num_samples {num_samples} "
         result_txt += f"--max_new_tokens {max_new_tokens} "
+        result_txt += f"--batch_size {batch_size} "
         result_txt += f"--top_k {top_k} "
         result_txt += f"--temperature {temperature} "
         result_txt += f"--cache_size {cache_size}" if cache_size else ""
@@ -411,13 +457,14 @@ if __name__ == '__main__':
     parser.add_argument('--interactive', action='store_true', help='Whether to launch in interactive mode')
     parser.add_argument('--num_samples', type=int, default=5, help='Number of samples.')
     parser.add_argument('--max_new_tokens', type=int, default=200, help='Maximum number of new tokens.')
+    parser.add_argument('--batch_size', type=int, default=1, help='Batch size to benchmark with')
     parser.add_argument('--top_k', type=int, default=200, help='Top-k for sampling.')
     parser.add_argument('--temperature', type=float, default=0.8, help='Temperature for sampling.')
     parser.add_argument('--checkpoint_path', type=Path, default=Path("../../../checkpoints/meta-llama/Llama-2-7b-chat-hf/model.pth"), help='Model checkpoint path.')
     parser.add_argument('-q', '--quantization', type=str, 
         help=(
-            'Which quantization techniques to apply: int8dq, int8wo, fp6, int4wo-<groupsize>, int4wo-<groupsize>-hqq, autoquant, '
-            +'autoquant-int4, autoquant-float8, uintx-<nbits>-<groupsize>, uintx-<nbits>-<groupsize>-hqq, sparse-marlin'
+            'Which quantization techniques to apply: int8dq, int8wo, fp6, int4wo-<group_size>, int4wo-<group_size>-hqq, autoquant, '
+            +'autoquant-int4, autoquant-float8, uintx-<nbits>-<group_size>, uintx-<nbits>-<group_size>-hqq, sparse-marlin'
         )
     )
     parser.add_argument('--kv_cache_quantization', action='store_true', help='Whether to quantize the KV cache')
@@ -434,6 +481,6 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     main(
-        args.prompt, args.interactive, args.num_samples, args.max_new_tokens, args.top_k,
+        args.prompt, args.interactive, args.num_samples, args.max_new_tokens, args.batch_size, args.top_k,
         args.temperature, args.checkpoint_path, args.quantization, args.kv_cache_quantization, args.cache_size, args.linear_causal_mask, args.save, args.compile, args.compile_prefill, args.profile, args.memory_profile, args.device, args.precision, args.write_result
     )
