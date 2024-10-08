@@ -20,7 +20,6 @@ class DType(Enum):
     INT32 = "INT32"
     FP16D8 = "FP16D8i"  # dynamic quantization
 
-
 ###################################################################################################################################
 # CUDA backend
 ###################################################################################################################################
@@ -107,7 +106,7 @@ class GemLiteLinearTriton(torch.nn.Module):
             acc_dtype = (
                 DType.FP16 if (self.compute_dtype == torch.float16) else DType.FP32
             )
-        self.acc_dtype = tl.float16 if (acc_dtype == DType.FP16) else tl.float32
+        self.acc_dtype = torch.float16 if (acc_dtype == DType.FP16) else torch.float32
 
         self.dtype = self.output_dtype
 

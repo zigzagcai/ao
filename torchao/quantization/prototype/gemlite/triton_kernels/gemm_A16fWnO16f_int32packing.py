@@ -4,7 +4,7 @@ import math, torch
 
 import triton
 import triton.language as tl
-
+from torch.library import custom_op, register_fake
 
 # code based https://github.com/fpgaminer/GPTQ-triton
 def kernel_config_pruner(configs, nargs, **kwargs):
@@ -83,11 +83,11 @@ def get_gemm_config():
 @triton.autotune(
     configs=get_gemm_config(),
     key=["M", "N", "K", "group_size", "W_nbits"],
-    # prune_configs_by={
-    #     'early_config_prune': kernel_config_pruner,
-    # },
-    # warmup=200,
-    # rep=50, #20 for faster tuning
+    prune_configs_by={
+        'early_config_prune': kernel_config_pruner,
+    },
+    warmup=200,
+    rep=50, #20 for faster tuning
 )
 @triton.jit
 def gemm_A16fWnO16f_int32packing_kernel(
@@ -194,28 +194,29 @@ def gemm_A16fWnO16f_int32packing_kernel(
 
     tl.store(c_ptrs, acc, mask=(offs_am[:, None] < M) & (offs_bn[None, :] < N))
 
-
+@custom_op("torchao::gemm_A16fWnO16f", mutates_args=(), device_types="cuda")
 def gemm_A16fWnO16f_int32packing_forward(
-    x,
-    W_q,
-    scales,
-    zeros,
-    W_nbits,
-    group_size,
-    unpack_mask,
-    elements_per_sample,
-    acc_dtype=tl.float16,
-):
+    x: torch.Tensor,
+    W_q: torch.Tensor,
+    scales: torch.Tensor,
+    zeros: torch.Tensor,
+    W_nbits: int,
+    group_size: int,
+    unpack_mask: int,
+    elements_per_sample: int,
+    acc_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
     output = torch.empty(
         (x.shape[0], W_q.shape[1]), device=W_q.device, dtype=scales.dtype
     )
-
     # assert x.shape[1] == W_q.shape[0] * elements_per_sample, "Invalid Input Shapes"
 
     grid = lambda META: (
         triton.cdiv(x.shape[0], META["BLOCK_SIZE_M"])
         * triton.cdiv(W_q.shape[1], META["BLOCK_SIZE_N"]),
     )
+
+    triton_acc_dtype = tl.float16 if acc_dtype == torch.float16 else tl.float32
 
     gemm_A16fWnO16f_int32packing_kernel[grid](
         x,
@@ -237,15 +238,32 @@ def gemm_A16fWnO16f_int32packing_forward(
         output.stride(0),
         output.stride(1),
         scales.stride(0),
-        acc_dtype,
+        triton_acc_dtype,
     )
 
     return output
 
+@register_fake("torchao::gemm_A16fWnO16f")
+def _(
+    x: torch.Tensor,
+    W_q: torch.Tensor,
+    scales: torch.Tensor,
+    zeros: torch.Tensor,
+    W_nbits: int,
+    group_size: int,
+    unpack_mask:int,
+    elements_per_sample: int,
+    acc_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    M, K = x.shape
+    K_samples, N = W_q.shape
+    return torch.empty((M, N,), device=x.device, dtype=scales.dtype)
+
 
 class gemm_A16fWnO16f_int32packing:
     kernel = gemm_A16fWnO16f_int32packing_kernel
-    forward = gemm_A16fWnO16f_int32packing_forward
+    forward = torch.ops.torchao.gemm_A16fWnO16f
+    # forward = gemm_A16fWnO16f_int32packing_forward
     matmul_type = "GEMM"
 
 

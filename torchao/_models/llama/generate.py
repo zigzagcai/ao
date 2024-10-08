@@ -255,6 +255,17 @@ def main(
 
             _replace_with_custom_fn_if_matches_filter(model, replace_fn, _is_linear)
 
+            generate(
+                model,
+                encode_tokens(tokenizer, prompt, bos=True, device=device),
+                max_new_tokens,
+                batch_size,
+                interactive=False,
+                temperature=temperature,
+                top_k=top_k,
+            )
+
+
         if "int8wo" in quantization:
             quantize_(model, int8_weight_only())
         if "int8dq" in quantization:

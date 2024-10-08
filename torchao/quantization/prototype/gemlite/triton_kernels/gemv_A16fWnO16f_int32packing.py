@@ -3,6 +3,7 @@
 import torch, math
 import triton
 import triton.language as tl
+from torch.library import custom_op, register_fake
 
 def init_to_zero(name):
     return lambda nargs: nargs[name].zero_()
@@ -112,13 +113,24 @@ def gemv_A16fWnO16f_int32packing_kernel(
     #Output: tl.atomic_add only supports 1D fp16 arrays, bfp16 would crash 
     tl.atomic_add(c_ptr + offs_bn + pid_m*N, acc, sem="relaxed", scope="cta") #Force cta scope
 
-
-def gemv_A16fWnO16f_int32packing_forward(x, W_q, scales, zeros, W_nbits, group_size, unpack_mask, elements_per_sample, acc_dtype=tl.float16):
+@custom_op("torchao::gemv_A16fWnO16f", mutates_args=(), device_types="cuda")
+def gemv_A16fWnO16f_int32packing_forward(
+    x: torch.Tensor,
+    W_q: torch.Tensor,
+    scales: torch.Tensor,
+    zeros: torch.Tensor,
+    W_nbits: int,
+    group_size: int,
+    unpack_mask: int,
+    elements_per_sample: int,
+    acc_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
     #assert x.shape[1] == W_q.shape[0] * elements_per_sample, "Invalid Input Shapes"
 	
     M, K, N = x.shape[0], x.shape[1], W_q.shape[1]
     output  = torch.empty((M, N), device=W_q.device, dtype=scales.dtype)
     grid    = lambda meta: (triton.cdiv(M, meta['BLOCK_SIZE_M']), triton.cdiv(K, meta['BLOCK_SIZE_K']), triton.cdiv(N, meta['BLOCK_SIZE_N']))
+    triton_acc_dtype = tl.float16 if acc_dtype == torch.float16 else tl.float32
 
     gemv_A16fWnO16f_int32packing_kernel[grid](
         x, W_q, output,
@@ -129,14 +141,31 @@ def gemv_A16fWnO16f_int32packing_forward(x, W_q, scales, zeros, W_nbits, group_s
         W_q.stride(0), W_q.stride(1),
         output.stride(0), output.stride(1),
         scales.stride(0),
-        acc_dtype
+        triton_acc_dtype,
     )
 
     return output
 
+@register_fake("torchao::gemv_A16fWnO16f")
+def _(
+    x: torch.Tensor,
+    W_q: torch.Tensor,
+    scales: torch.Tensor,
+    zeros: torch.Tensor,
+    W_nbits: int,
+    group_size: int,
+    unpack_mask:int,
+    elements_per_sample: int,
+    acc_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    M, K = x.shape
+    K_samples, N = W_q.shape
+    return torch.empty((M, N,), device=x.device, dtype=scales.dtype)
+
 class gemv_A16fWnO16f_int32packing:
     kernel = gemv_A16fWnO16f_int32packing_kernel
-    forward = gemv_A16fWnO16f_int32packing_forward
+    forward = torch.ops.torchao.gemv_A16fWnO16f
+    # forward = gemv_A16fWnO16f_int32packing_forward
     matmul_type = "GEMV"
 
 __all__ = ["gemv_A16fWnO16f_int32packing"]
