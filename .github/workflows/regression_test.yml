@@ -71,7 +71,7 @@ jobs:
             gpu-arch-type: "cpu"
             gpu-arch-version: ""
             
-    uses: pytorch/test-infra/.github/workflows/linux_job.yml@main
+    uses: pytorch/test-infra/.github/workflows/linux_job.yml@rocm_experiment
     with:
       timeout: 60
       no-sudo: true
