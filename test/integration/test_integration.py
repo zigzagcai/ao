@@ -84,6 +84,7 @@ from torchao.utils import (
     TORCH_VERSION_AT_LEAST_2_3,
     TORCH_VERSION_AT_LEAST_2_4,
     TORCH_VERSION_AT_LEAST_2_5,
+    TORCH_VERSION_AT_LEAST_2_6,
     unwrap_tensor_subclass,
     is_fbcode,
     benchmark_model
@@ -104,10 +105,20 @@ is_H100 = torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8
 def _int8wo_api(mod):
     if TORCH_VERSION_AT_LEAST_2_4:
         quantize_(mod, int8_weight_only(), set_inductor_config=False)
-        if not TORCH_VERSION_AT_LEAST_2_5:
+        if (
+            not TORCH_VERSION_AT_LEAST_2_5
+            or (
+                not TORCH_VERSION_AT_LEAST_2_6
+                and torch._inductor.config.freezing
+            )
+        ):
             unwrap_tensor_subclass(mod)
     else:
         change_linear_weights_to_int8_woqtensors(mod)
+
+def _int8wo_groupwise_api(mod):
+    group_size = 32
+    quantize_(mod, int8_weight_only(group_size=group_size), set_inductor_config=False)
 
 def _int8da_int8w_api(mod):
     if TORCH_VERSION_AT_LEAST_2_4:
@@ -328,6 +339,7 @@ class SmoothquantUnitTest(unittest.TestCase):
         assert torch.allclose(y_ref, y)
 
     @unittest.skipIf(not torch.cuda.is_available(), "Need CUDA available")
+    @unittest.skipIf(not TORCH_VERSION_AT_LEAST_2_3, "newer dtypes not supported")
     def test_weight_t_and_non_t_numerics_match(self):
         # verify that numerics match whether weight is stored
         # in transposed format (for cuBLAS) vs non-transposed format
@@ -838,6 +850,12 @@ class TestSubclass(unittest.TestCase):
     @parameterized.expand(COMMON_DEVICE_DTYPE)
     @unittest.skipIf(is_fbcode(), "broken in fbcode")
     def test_int8_weight_only_quant_subclass_api(self, device, dtype):
+        if (
+            not TORCH_VERSION_AT_LEAST_2_6
+            and dtype in (torch.float16, torch.bfloat16)
+            and device == "cpu"
+        ):
+            self.skipTest(f"Regression fixed after torch 2.6")
         undo_recommended_configs()
         self._test_lin_weight_subclass_api_impl(
             _int8wo_api, device, 40, test_dtype=dtype
@@ -925,6 +943,18 @@ class TestWeightOnlyInt8Quant(unittest.TestCase):
             y_wo = m(x)
             sqnr = compute_error(y_ref, y_wo)
             self.assertGreater(sqnr, 43.0)
+
+    def test_weight_only_groupwise_quant(self):
+        for x_shape in [[128, 512]]:
+            x = torch.randn(*x_shape)
+            m = nn.Sequential(nn.Linear(512, 32))
+            y_ref = m(x)
+            _int8wo_groupwise_api(m)
+            self.assertEqual(m[0].weight.tensor_impl.int_data.shape, torch.Size([32, 512]))
+            self.assertEqual(m[0].weight.tensor_impl.scale.shape, torch.Size([32, 16]))
+            y_wo = m(x)
+            sqnr = compute_error(y_ref, y_wo)
+            self.assertGreater(sqnr, 45.0)
 
     @parameterized.expand(COMMON_DEVICE_DTYPE)
     @torch.no_grad()
@@ -1062,6 +1092,12 @@ class TestSaveLoadMeta(unittest.TestCase):
     @torch.no_grad()
     @unittest.skipIf(is_fbcode(), "broken in fbcode")
     def test_save_load_int8woqtensors(self, device, dtype):
+        if (
+            not TORCH_VERSION_AT_LEAST_2_6
+            and dtype in (torch.float16, torch.bfloat16)
+            and device == "cpu"
+        ):
+            self.skipTest(f"Regression fixed after torch 2.6")
         undo_recommended_configs()
         self._test_handle_save_load_meta_impl(_int8wo_api, device, test_dtype=dtype)
 
@@ -1126,6 +1162,7 @@ class UtilsUnitTest(unittest.TestCase):
 class SmoothquantIntegrationTest(unittest.TestCase):
     @torch.no_grad()
     @unittest.skipIf(not torch.cuda.is_available(), "Need CUDA available")
+    @unittest.skipIf(not TORCH_VERSION_AT_LEAST_2_3, "newer dtypes not supported")
     def test_non_dynamically_quantizable_linear(self):
         if torch.cuda.is_available() and torch.cuda.get_device_capability() < (8, 0):
             self.skipTest("test requires SM capability of at least (8, 0).")

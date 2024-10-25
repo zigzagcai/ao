@@ -7,6 +7,7 @@
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
+#include <torchao/experimental/ops/packed_weights_header.h>
 
 namespace torchao::ops::linear_8bit_act_xbit_weight {
 
@@ -26,7 +27,8 @@ struct UKernelConfig {
       int group_size,
       const int8_t* weight_qvals,
       const float* weight_scales,
-      const int8_t* weight_zeros);
+      const int8_t* weight_zeros,
+      const float* bias);
   using kernel_fn_type = void (*)(
       float* output,
       int output_m_stride,
@@ -36,7 +38,6 @@ struct UKernelConfig {
       int group_size,
       const void* weight_data,
       const void* activation_data,
-      const float* bias,
       float clamp_min,
       float clamp_max);
 
@@ -59,6 +60,8 @@ struct UKernelConfig {
   kernel_fn_type kernel_fn{nullptr};
   int mr{0};
   int nr{0};
+
+  torchao::ops::PackedWeightsHeader packed_weights_header;
 };
 
 // Pack weight functions
@@ -95,7 +98,8 @@ void pack_weight_data_operator(
     int group_size,
     const int8_t* weight_qvals,
     const float* weight_scales,
-    const int8_t* weight_zeros);
+    const int8_t* weight_zeros,
+    const float* bias);
 
 // Linear functions
 struct LinearTilingParams {
@@ -141,7 +145,6 @@ void linear_operator(
     int group_size,
     const void* weight_data,
     const float* activations,
-    const float* bias,
     float clamp_min,
     float clamp_max);
 

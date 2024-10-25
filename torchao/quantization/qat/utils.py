@@ -46,7 +46,7 @@ class _GenericFakeQuantize(torch.autograd.Function):
         zero_point_domain: ZeroPointDomain = ZeroPointDomain.INT,
     ) -> torch.Tensor:
         # avoid circular dependencies
-        from torchao.quantization.prototype.qat.affine_fake_quantized_tensor import (
+        from torchao.quantization.qat.affine_fake_quantized_tensor import (
             AffineFakeQuantizedTensor,
         )
 
@@ -88,7 +88,7 @@ class _UnwrapAffineFakeQuantizedTensor(torch.autograd.Function):
         input: torch.Tensor,
     ) -> torch.Tensor:
         # avoid circular dependencies
-        from torchao.quantization.prototype.qat.affine_fake_quantized_tensor import (
+        from torchao.quantization.qat.affine_fake_quantized_tensor import (
             AffineFakeQuantizedTensor,
         )
         assert isinstance(input, AffineFakeQuantizedTensor)
@@ -181,7 +181,11 @@ def _choose_qparams_per_token_asymmetric(
 
     return scale.to(scales_precision), zero_point.to(zero_points_precision)
 
-def _get_qmin_qmax(n_bit: int):
-    qmin = -(2 ** (n_bit - 1))
-    qmax = 2 ** (n_bit - 1) - 1
+def _get_qmin_qmax(n_bit: int, symmetric: bool=True):
+    if symmetric:
+        qmin = -(2 ** (n_bit - 1))
+        qmax = 2 ** (n_bit - 1) - 1
+    else:
+        qmin = 0
+        qmax = 2 ** n_bit - 1
     return (qmin, qmax)
